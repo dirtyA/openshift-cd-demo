@@ -1,133 +1,162 @@
-*For other versions of OpenShift, follow the instructions in the corresponding branch e.g. ocp-3.6, ocp-3.5, etc*
+*For other versions of OpenShift, follow the instructions in the corresponding branch e.g. ocp-4.1, ocp-3.11, , etc
 
-# CI/CD Demo - OpenShift Container Platform 3.6
+# CI/CD Demo - OpenShift Container Platform 4.1
 
-This repository includes the infrastructure and pipeline definition for continuous delivery using Jenkins, Nexus and SonarQube on OpenShift. On every pipeline execution, the code goes through the following steps:
+This repository includes the infrastructure and pipeline definition for continuous delivery using Jenkins, Nexus, SonarQube and Eclipse Che on OpenShift. 
+
+* [Introduction](#introduction)
+* [Prerequisites](#prerequisites)
+* [Deploy on RHPDS](#deploy-on-rhpds)
+* [Automated Deploy on OpenShift](#automatic-deploy-on-openshift)
+* [Manual Deploy on OpenShift](#manual-deploy-on-openshift)
+* [Troubleshooting](#troubleshooting)
+* [Demo Guide](#demo-guide)
+* [Using Eclipse Che for Editing Code](#using-eclipse-che-for-editing-code)
+
+
+## Introduction
+
+On every pipeline execution, the code goes through the following steps:
 
 1. Code is cloned from Gogs, built, tested and analyzed for bugs and bad patterns
 2. The WAR artifact is pushed to Nexus Repository manager
-3. A Docker image (_tasks:latest_) is built based on the _Tasks_ application WAR artifact deployed on JBoss EAP 6
-4. The _Tasks_ Docker image is deployed in a fresh new container in DEV project
-5. If tests successful, the DEV image is tagged with the application version (_tasks:7.x_) in the STAGE project
-6. The staged image is deployed in a fresh new container in the STAGE project
+3. A container image (_tasks:latest_) is built based on the _Tasks_ application WAR artifact deployed on WildFly
+4. If Quay.io is enabled, the Tasks app container image is pushed to the quay.io image registry and a security scan is scheduled
+4. The _Tasks_ container image is deployed in a fresh new container in DEV project (pulled form Quay.io, if enabled)
+5. If tests successful, the pipeline is paused for the release manager to approve the release to STAGE
+6. If approved, the DEV image is tagged in the STAGE project. If Quay.io is enabled, the image is tagged in the Quay.io image repository using [Skopeo](https://github.com/containers/skopeo)
+6. The staged image is deployed in a fresh new container in the STAGE project (pulled form Quay.io, if enabled)
 
 The following diagram shows the steps included in the deployment pipeline:
 
-![](images/pipeline.png?raw=true)
+![](images/pipeline.svg)
 
 The application used in this pipeline is a JAX-RS application which is available on GitHub and is imported into Gogs during the setup process:
 [https://github.com/OpenShiftDemos/openshift-tasks](https://github.com/OpenShiftDemos/openshift-tasks/tree/eap-7)
 
-# Prerequisites
-* 8+ GB memory available on OpenShift nodes
-* JBoss EAP 7 imagestreams imported to OpenShift (see Troubleshooting section for details)
+## Prerequisites
+* 10+ GB memory
 
-# Setup on RHPDS
+## Deploy on RHPDS
 
 If you have access to RHPDS, provisioning of this demo is automated via the service catalog under **OpenShift Demos &rarr; OpenShift CI/CD for Monolith**. If you don't know what RHPDS is, read the instructions in the next section.
 
-# Setup on OpenShift
-Follow these [instructions](docs/local-cluster.md) in order to create a local OpenShift cluster. Otherwise using your current OpenShift cluster, create the following projects for CI/CD components, Dev and Stage environments:
+## Automated Deploy on OpenShift
+You can se the `scripts/provision.sh` script provided to deploy the entire demo:
 
   ```
+  ./provision.sh --help
+  ./provision.sh deploy --enable-che --ephemeral # with Eclipse Che
+  ./provision.sh delete 
+  ```
+If you want to use Quay.io as an external registry with this demo, Go to quay.io and register for free. Then deploy the demo providing your 
+quay.io credentials:
+
+  ```
+  ./provision.sh deploy --enable-quay --quay-username quay_username --quay-password quay_password
+  ```
+In that case, the pipeline would create an image repository called `tasks-app` (default name but configurable) 
+on your Quay.io account and use that instead of the integrated OpenShift 
+registry, for pushing the built images and also pulling images for deployment. 
+  
+## Manual Deploy on OpenShift
+Follow these [instructions](docs/local-cluster.md) in order to create a local OpenShift cluster. Otherwise using your current OpenShift cluster, create the following projects for CI/CD components, Dev and Stage environments:
+
+  ```shell
+  # Create Projects
   oc new-project dev --display-name="Tasks - Dev"
   oc new-project stage --display-name="Tasks - Stage"
   oc new-project cicd --display-name="CI/CD"
 
-  oc policy add-role-to-user edit system:serviceaccount:cicd:jenkins -n dev
-  oc policy add-role-to-user edit system:serviceaccount:cicd:jenkins -n stage
+  # Grant Jenkins Access to Projects
+  oc policy add-role-to-group edit system:serviceaccounts:cicd -n dev
+  oc policy add-role-to-group edit system:serviceaccounts:cicd -n stage
+  ```  
 
-  oc new-app jenkins-persistent --param=MEMORY_LIMIT=1Gi -e INSTALL_PLUGINS=analysis-core:1.92,findbugs:4.71,pmd:3.49,checkstyle:3.49,dependency-check-jenkins-plugin:2.1.1,htmlpublisher:1.14,jacoco:2.2.1,analysis-collector:1.52 -n cicd
-  ```
-
-You can choose to use either SonarQube for static code and security analysis or instead use Maven plugins 
-and generated reports within the Jenkins:
+And then deploy the demo:
 
   ```
-  # Deploy Pipeline with SonarQube
-  oc new-app -n cicd -f cicd-template-with-sonar.yaml
-
-  # Deploy Pipeline without SonarQube
+  # Deploy Demo
   oc new-app -n cicd -f cicd-template.yaml
   ```
 
 To use custom project names, change `cicd`, `dev` and `stage` in the above commands to
 your own names and use the following to create the demo:
 
-  ```
-  oc new-app -n mycicd -f cicd-template.yaml --param DEV_PROJECT=mydev --param STAGE_PROJECT=mystage
-  ```
-
-Instead of the above, you can also use the `scripts/provision.sh` script provided which does the exact steps as described above:
-  ```
-  ./provision.sh --help
-  ./provision.sh deploy --with-sonar --ephemeral
-  ./provision.sh delete
+  ```shell
+  oc new-app -n cicd -f cicd-template.yaml --param DEV_PROJECT=dev-project-name --param STAGE_PROJECT=stage-project-name
   ```
 
-__Note:__ you need ~8GB memory for running this demo.
+# JBoss EAP vs WildFly
 
-# Guide
+This demo by default uses the WildFly community image. You can use the JBoss EAP enterprise images provide by Red Hat by simply editing the 
+`tasks` build config in the _Tasks - Dev_ project and changing the builder image from `wildfly` to `jboss-eap70-openshift:1.5`. The demo would work exactly the same and would build the images using the JBoss EAP builder image. If using Quay, be sure not to leave the JBoss EAP images on a publicly accessible image repository. 
 
-1. A Jenkins pipeline is pre-configured which clones Tasks application source code from Gogs (running on OpenShift), builds, deploys and promotes the result through the deployment pipeline. In the CI/CD project, click on _Builds_ and then _Pipelines_ to see the list of defined pipelines.
+## Troubleshooting
+
+* If Maven fails with `/opt/rh/rh-maven33/root/usr/bin/mvn: line 9:   298 Killed` (e.g. during static analysis), you are running out of memory and need more memory for OpenShift.
+
+* If running into `Permission denied` issues on minishift or CDK, run the following to adjust minishift persistent volume permissions:
+  ```
+  minishift ssh
+  chmod 777 -R /var/lib/minishift/
+  ```
+
+## Demo Guide
+
+* Take note of these credentials and then follow the demo guide below:
+
+  * Gogs: `gogs/gogs`
+  * Nexus: `admin/admin123`
+  * SonarQube: `admin/admin`
+
+* A Jenkins pipeline is pre-configured which clones Tasks application source code from Gogs (running on OpenShift), builds, deploys and promotes the result through the deployment pipeline. In the CI/CD project, click on _Builds_ and then _Pipelines_ to see the list of defined pipelines.
 
     Click on _tasks-pipeline_ and _Configuration_ and explore the pipeline definition.
 
     You can also explore the pipeline job in Jenkins by clicking on the Jenkins route url, logging in with the OpenShift credentials and clicking on _tasks-pipeline_ and _Configure_.
 
-2. Run an instance of the pipeline by starting the _tasks-pipeline_ in OpenShift or Jenkins.
+* Run an instance of the pipeline by starting the _tasks-pipeline_ in OpenShift or Jenkins.
 
-3. During pipeline execution, verify a new Jenkins slave pod is created within _CI/CD_ project to execute the pipeline.
+* During pipeline execution, verify a new Jenkins slave pod is created within _CI/CD_ project to execute the pipeline.
 
-4. Pipelines pauses at _Deploy STAGE_ for approval in order to promote the build to the STAGE environment. Click on this step on the pipeline and then _Promote_.
+* If you have enabled Quay, after image build completes go to quay.io and show that a image repository is created and contains the Tasks app image
 
-5. After pipeline completion, demonstrate the following:
+![](images/quay-pushed.png?raw=true)
+
+* Pipelines pauses at _Deploy STAGE_ for approval in order to promote the build to the STAGE environment. Click on this step on the pipeline and then _Promote_.
+
+* After pipeline completion, demonstrate the following:
   * Explore the _snapshots_ repository in Nexus and verify _openshift-tasks_ is pushed to the repository
-  * Explore SonarQube or pipeline in Jenkins and show the metrics, stats, code coverage, etc
+  * Explore SonarQube and show the metrics, stats, code coverage, etc
   * Explore _Tasks - Dev_ project in OpenShift console and verify the application is deployed in the DEV environment
   * Explore _Tasks - Stage_ project in OpenShift console and verify the application is deployed in the STAGE environment  
+  * If Quay enabled, click on the image tag in quay.io and show the security scannig results 
 
-6. Clone and checkout the _eap-7_ branch of the _openshift-tasks_ git repository and using an IDE (e.g. JBoss Developer Studio), remove the ```@Ignore``` annotation from ```src/test/java/org/jboss/as/quickstarts/tasksrs/service/UserResourceTest.java``` test methods to enable the unit tests. Commit and push to the git repo.
+![](images/sonarqube-analysis.png?raw=true)
 
-7. Check out Jenkins, a pipeline instance is created and is being executed. The pipeline will fail during unit tests due to the enabled unit test.
+![](images/quay-claire.png?raw=true)
 
-8. Check out the failed unit and test ```src/test/java/org/jboss/as/quickstarts/tasksrs/service/UserResourceTest.java``` and run it in the IDE.
+* Clone and checkout the _eap-7_ branch of the _openshift-tasks_ git repository and using an IDE (e.g. JBoss Developer Studio), remove the ```@Ignore``` annotation from ```src/test/java/org/jboss/as/quickstarts/tasksrs/service/UserResourceTest.java``` test methods to enable the unit tests. Commit and push to the git repo.
 
-9. Fix the test by modifying ```src/main/java/org/jboss/as/quickstarts/tasksrs/service/UserResource.java``` and uncommenting the sort function in _getUsers_ method.
+* Check out Jenkins, a pipeline instance is created and is being executed. The pipeline will fail during unit tests due to the enabled unit test.
 
-10. Run the unit test in the IDE. The unit test runs green. Commit and push the fix to the git repository and verify a pipeline instance is created in Jenkins and executes successfully.
+* Check out the failed unit and test ```src/test/java/org/jboss/as/quickstarts/tasksrs/service/UserResourceTest.java``` and run it in the IDE.
 
-![](images/jenkins-pipeline.png?raw=true)
+* Fix the test by modifying ```src/main/java/org/jboss/as/quickstarts/tasksrs/service/UserResource.java``` and uncommenting the sort function in _getUsers_ method.
 
-# Troubleshoot
+* Run the unit test in the IDE. The unit test runs green. 
 
-* SonarQube sometimes fails to load quality profiles requires for static analysis.
-  ```
-  [ERROR] Failed to execute goal org.sonarsource.scanner.maven:sonar-maven-plugin:3.0.1:sonar (default-cli) on project jboss-tasks-rs: No quality profiles have been found, you probably don't have any
-  ```
+* Commit and push the fix to the git repository and verify a pipeline instance is created in Jenkins and executes successfully.
 
-  Scale down the SonarQube pod and its PostgreSQL database to 0 and then scale them up to 1 again (first PostgreSQL, then SonarQube) to re-initialize SonarQube.
+![](images/openshift-pipeline.png?raw=true)
 
-* Downloading the images might take a while depending on the network. Remove the _install-gogs_ pod and re-create the app to retry Gogs initialization.
+## Using Eclipse Che for Editing Code
 
-  ```
-  $ oc delete pod install-gogs
-  $ oc delete pods -l app=gogs
-  $ oc process -f cicd-template.yaml | oc create -f -
+If you deploy the demo template using `DEPLOY_CHE=true` paramter, or the deploy script and use `--deploy-che` flag, then an [Eclipse Che](https://www.eclipse.org/che/) instances will be deployed within the CI/CD project which allows you to use the Eclipse Che web-based IDE for editing code in this demo.
 
-  pod "install-gogs" created
-  Error from server: routes "jenkins" already exists
-  Error from server: deploymentconfigs "jenkins" already exists
-  Error from server: serviceaccounts "jenkins" already exists
-  Error from server: rolebinding "jenkins_edit" already exists
-  ...
-  ```
+Follow these [instructions](docs/using-eclipse-che.md) to use Eclipse Che for editing code in the above demo flow.  
 
-* If the cicd-pipeline Jenkins job has disappeared, scale Jenkins pod to 0 and up to 1 again to force a job sync with OpenShift pipelines.
+# Watch on YouTube
 
-* If pipeline execution fails with ```error: no match for "jboss-eap70-openshift"```, import the jboss imagestreams in OpenShift.
-
-  ```
-  oc login -u system:admin
-  oc create -f https://raw.githubusercontent.com/jboss-openshift/application-templates/master/jboss-image-streams.json -n openshift
-  ```
+[![Continuous Delivery with OpenShift](images/youtube.png?raw=true)](https://youtu.be/_xh4XPkdXe0)

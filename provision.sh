@@ -17,15 +17,18 @@ function usage() {
     echo "COMMANDS:"
     echo "   deploy                   Set up the demo projects and deploy demo apps"
     echo "   delete                   Clean up and remove demo projects and objects"
-    echo "   idle                     Make all demo servies idle"
-    echo "   unidle                   Make all demo servies unidle"
+    echo "   idle                     Make all demo services idle"
+    echo "   unidle                   Make all demo services unidle"
     echo 
     echo "OPTIONS:"
-    echo "   --user [username]         The admin user for the demo projects. mandatory if logged in as system:admin"
-    echo "   --project-suffix [suffix] Suffix to be added to demo project names e.g. ci-SUFFIX. If empty, user will be used as suffix"
-    echo "   --ephemeral               Deploy demo without persistent storage"
-    echo "   --use-sonar               Use SonarQube for static code analysis instead of CheckStyle,FindBug,etc"
-    echo "   --oc-options              oc client options to pass to all oc commands e.g. --server https://my.openshift.com"
+    echo "   --enable-quay              Optional    Enable integration of build and deployments with quay.io"
+    echo "   --quay-username            Optional    quay.io username to push the images to a quay.io account. Required if --enable-quay is set"
+    echo "   --quay-password            Optional    quay.io password to push the images to a quay.io account. Required if --enable-quay is set"
+    echo "   --user [username]          Optional    The admin user for the demo projects. Required if logged in as system:admin"
+    echo "   --project-suffix [suffix]  Optional    Suffix to be added to demo project names e.g. ci-SUFFIX. If empty, user will be used as suffix"
+    echo "   --ephemeral                Optional    Deploy demo without persistent storage. Default false"
+    echo "   --enable-che               Optional    Deploy Eclipse Che as an online IDE for code changes. Default false"
+    echo "   --oc-options               Optional    oc client options to pass to all oc commands e.g. --server https://my.openshift.com"
     echo
 }
 
@@ -34,7 +37,10 @@ ARG_PROJECT_SUFFIX=
 ARG_COMMAND=
 ARG_EPHEMERAL=false
 ARG_OC_OPS=
-ARG_USE_SONAR=false
+ARG_DEPLOY_CHE=false
+ARG_ENABLE_QUAY=false
+ARG_QUAY_USER=
+ARG_QUAY_PASS=
 
 while :; do
     case $1 in
@@ -80,11 +86,34 @@ while :; do
                 exit 255
             fi
             ;;
+        --enable-quay)
+            ARG_ENABLE_QUAY=true
+            ;;
+        --quay-username)
+            if [ -n "$2" ]; then
+                ARG_QUAY_USER=$2
+                shift
+            else
+                printf 'ERROR: "--quay-username" requires a non-empty value.\n' >&2
+                usage
+                exit 255
+            fi
+            ;;
+        --quay-password)
+            if [ -n "$2" ]; then
+                ARG_QUAY_PASS=$2
+                shift
+            else
+                printf 'ERROR: "--quay-password" requires a non-empty value.\n' >&2
+                usage
+                exit 255
+            fi
+            ;;
         --ephemeral)
             ARG_EPHEMERAL=true
             ;;
-        --use-sonar)
-            ARG_USE_SONAR=true
+        --enable-che|--deploy-che)
+            ARG_DEPLOY_CHE=true
             ;;
         -h|--help)
             usage
@@ -113,8 +142,8 @@ done
 LOGGEDIN_USER=$(oc $ARG_OC_OPS whoami)
 OPENSHIFT_USER=${ARG_USERNAME:-$LOGGEDIN_USER}
 PRJ_SUFFIX=${ARG_PROJECT_SUFFIX:-`echo $OPENSHIFT_USER | sed -e 's/[-@].*//g'`}
-GITHUB_ACCOUNT=${GITHUB_ACCOUNT:-OpenShiftDemos}
-GITHUB_REF=${GITHUB_REF:-ocp-3.6}
+GITHUB_ACCOUNT=${GITHUB_ACCOUNT:-siamaksade}
+GITHUB_REF=${GITHUB_REF:-ocp-4.1}
 
 function deploy() {
   oc $ARG_OC_OPS new-project dev-$PRJ_SUFFIX   --display-name="Tasks - Dev"
@@ -123,8 +152,8 @@ function deploy() {
 
   sleep 2
 
-  oc $ARG_OC_OPS policy add-role-to-user edit system:serviceaccount:cicd-$PRJ_SUFFIX:jenkins -n dev-$PRJ_SUFFIX
-  oc $ARG_OC_OPS policy add-role-to-user edit system:serviceaccount:cicd-$PRJ_SUFFIX:jenkins -n stage-$PRJ_SUFFIX
+  oc $ARG_OC_OPS policy add-role-to-group edit system:serviceaccounts:cicd-$PRJ_SUFFIX -n dev-$PRJ_SUFFIX
+  oc $ARG_OC_OPS policy add-role-to-group edit system:serviceaccounts:cicd-$PRJ_SUFFIX -n stage-$PRJ_SUFFIX
 
   if [ $LOGGEDIN_USER == 'system:admin' ] ; then
     oc $ARG_OC_OPS adm policy add-role-to-user admin $ARG_USERNAME -n dev-$PRJ_SUFFIX >/dev/null 2>&1
@@ -140,34 +169,13 @@ function deploy() {
 
   sleep 2
 
-  local jenkins_template="jenkins-persistent"
-  if [ "$ARG_EPHEMERAL" = true ] ; then
-    jenkins_template="jenkins-ephemeral"
-  fi
-
-  oc $ARG_OC_OPS new-app $jenkins_template --param=MEMORY_LIMIT=1Gi -e INSTALL_PLUGINS=analysis-core:1.92,findbugs:4.71,pmd:3.49,checkstyle:3.49,dependency-check-jenkins-plugin:2.1.1,htmlpublisher:1.14,jacoco:2.2.1,analysis-collector:1.52 -n cicd-$PRJ_SUFFIX
+  oc new-app jenkins-ephemeral -n cicd-$PRJ_SUFFIX
 
   sleep 2
-  
+
   local template=https://raw.githubusercontent.com/$GITHUB_ACCOUNT/openshift-cd-demo/$GITHUB_REF/cicd-template.yaml
-
-  if [ "$ARG_USE_SONAR" = true ] ; then
-    template=https://raw.githubusercontent.com/$GITHUB_ACCOUNT/openshift-cd-demo/$GITHUB_REF/cicd-template-with-sonar.yaml
-  fi
-
   echo "Using template $template"
-  oc $ARG_OC_OPS process -f $template \
-      --param DEV_PROJECT=dev-$PRJ_SUFFIX \
-      --param STAGE_PROJECT=stage-$PRJ_SUFFIX \
-      -n cicd-$PRJ_SUFFIX | oc $ARG_OC_OPS create -f - -n cicd-$PRJ_SUFFIX
-
-  sleep 2
-
-  if [ "$ARG_EPHEMERAL" = true ] ; then
-    remove_storage_claim postgresql-gogs postgresql-data postgresql-gogs-data cicd-$PRJ_SUFFIX
-    remove_storage_claim gogs gogs-data gogs-data cicd-$PRJ_SUFFIX
-    remove_storage_claim gogs gogs-config gogs-config cicd-$PRJ_SUFFIX
-  fi
+  oc $ARG_OC_OPS new-app -f $template -p DEV_PROJECT=dev-$PRJ_SUFFIX -p STAGE_PROJECT=stage-$PRJ_SUFFIX -p DEPLOY_CHE=$ARG_DEPLOY_CHE -p EPHEMERAL=$ARG_EPHEMERAL -p ENABLE_QUAY=$ARG_ENABLE_QUAY -p QUAY_USERNAME=$ARG_QUAY_USER -p QUAY_PASSWORD=$ARG_QUAY_PASS -n cicd-$PRJ_SUFFIX 
 }
 
 function make_idle() {
@@ -192,6 +200,12 @@ function make_unidle() {
   done
 }
 
+function set_default_project() {
+  if [ $LOGGEDIN_USER == 'system:admin' ] ; then
+    oc $ARG_OC_OPS project default >/dev/null
+  fi
+}
+
 function remove_storage_claim() {
   local _DC=$1
   local _VOLUME_NAME=$2
@@ -199,12 +213,6 @@ function remove_storage_claim() {
   local _PROJECT=$4
   oc $ARG_OC_OPS volumes dc/$_DC --name=$_VOLUME_NAME --add -t emptyDir --overwrite -n $_PROJECT
   oc $ARG_OC_OPS delete pvc $_CLAIM_NAME -n $_PROJECT >/dev/null 2>&1
-}
-
-function set_default_project() {
-  if [ $LOGGEDIN_USER == 'system:admin' ] ; then
-    oc $ARG_OC_OPS project default >/dev/null
-  fi
 }
 
 function echo_header() {
@@ -275,4 +283,3 @@ popd >/dev/null
 
 END=`date +%s`
 echo "(Completed in $(( ($END - $START)/60 )) min $(( ($END - $START)%60 )) sec)"
-echo 
